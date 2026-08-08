@@ -18,7 +18,9 @@ jobs:
 
       - run: pyinstaller --windowed --onefile --name ClickerUtility clicker_utility.py
 
+      - run: cd dist && zip -r ClickerUtility-macos.zip ClickerUtility.app
+
       - uses: actions/upload-artifact@v4
         with:
           name: ClickerUtility-macos
-          path: dist/ClickerUtility.app
+          path: dist/ClickerUtility-macos.zip
