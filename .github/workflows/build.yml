@@ -1,0 +1,24 @@
+name: build-macos
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - run: pyinstaller --windowed --onefile --name ClickerUtility clicker_utility.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClickerUtility-macos
+          path: dist/ClickerUtility.app
