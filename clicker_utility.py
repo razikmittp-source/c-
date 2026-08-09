@@ -121,7 +121,7 @@ class MouseController:
             t = i / steps
             x = start[0] + (end[0] - start[0]) * t
             y = start[1] + (end[1] - start[1]) * t
-            pyautogui.moveTo(x, y)
+            pyautogui.dragTo(x, y, button="left", mouseDownUp=False)
             time.sleep(step_delay)
 
         pyautogui.mouseUp()
@@ -422,11 +422,18 @@ class ClickerApp:
         row.pack(fill="x", pady=(10, 0))
         ttk.Label(row, text="Повторов:", style="Card.TLabel").pack(side="left")
         ttk.Spinbox(row, from_=0, to=999, textvariable=v["count"], width=5).pack(side="left", padx=(6, 18))
-        ttk.Label(row, text="Дистанция, px:", style="Card.TLabel").pack(side="left")
+        ttk.Label(row, text="Дистанция перетягивания, px:", style="Card.TLabel").pack(side="left")
         ttk.Entry(row, textvariable=v["distance"], width=6, style="Mono.TEntry").pack(side="left", padx=(6, 18))
         ttk.Label(row, text="Направление:", style="Card.TLabel").pack(side="left")
         ttk.Combobox(row, textvariable=v["direction"], values=["right", "left"], width=6,
                      state="readonly").pack(side="left", padx=(6, 0))
+
+        ttk.Label(
+            box,
+            text="Дистанция — на сколько пикселей палец сдвинется за одно перетягивание "
+                 "(влево или вправо от случайной точки в области).",
+            style="Muted.Card.TLabel", wraplength=480, justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
     def _build_click_section(self, parent, title, v):
         box = self._card(parent, title)
