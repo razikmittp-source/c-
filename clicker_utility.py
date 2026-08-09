@@ -13,6 +13,8 @@ from tkinter import filedialog, ttk
 import pyautogui
 from pynput import keyboard, mouse
 
+pyautogui.PAUSE = 0  # управляем скоростью сами; встроенная пауза pyautogui после каждого вызова не нужна
+
 STOP_HOTKEY = "<cmd>+<alt>+<esc>"
 HOTKEY_LABEL = "⌘⌥⎋"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
