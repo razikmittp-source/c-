@@ -186,7 +186,7 @@ def count_photo_segments(top_left, bottom_right):
     threshold = (max(col_brightness) + min(col_brightness)) / 2
     is_bright = [b >= threshold for b in col_brightness]
 
-    min_segment = 2
+    min_segment = max(3, int(width * 0.01))
     segments = 0
     run = 0
     for bright in is_bright:
@@ -198,6 +198,15 @@ def count_photo_segments(top_left, bottom_right):
             run = 0
 
     return segments
+
+
+def clicks_for_segment_count(segments: int) -> int:
+    """0 полосок -> 0 кликов, 2 полоски -> 1 клик, 3 и больше -> 3 клика (не растёт дальше)."""
+    if segments <= 1:
+        return 0
+    if segments == 2:
+        return 1
+    return 3
 
 
 def is_accessibility_trusted() -> bool:
@@ -291,7 +300,7 @@ class AutomationEngine:
                 segments = count_photo_segments(filler.indicator_top_left, filler.indicator_bottom_right)
             except Exception:
                 segments = 0
-            return max(segments - 1, 0)
+            return clicks_for_segment_count(segments)
         return filler.random_repeat_count()
 
     def _wait_random_delay(self, config: AppConfig):
