@@ -45,6 +45,9 @@ class ClickBatch:
     point: tuple = (750, 800)
     repeat_min: int = 3
     repeat_max: int = 3
+    smart_indicator_enabled: bool = False
+    indicator_top_left: tuple = (0, 0)
+    indicator_bottom_right: tuple = (0, 0)
 
     def random_repeat_count(self):
         return random.randint(min(self.repeat_min, self.repeat_max), max(self.repeat_min, self.repeat_max))
@@ -86,13 +89,23 @@ def _drag_batch_from_dict(d: dict) -> DragBatch:
 
 
 def _click_batch_to_dict(b: ClickBatch) -> dict:
-    return {"point": _point_to_dict(b.point), "repeatMin": b.repeat_min, "repeatMax": b.repeat_max}
+    return {
+        "point": _point_to_dict(b.point),
+        "repeatMin": b.repeat_min,
+        "repeatMax": b.repeat_max,
+        "smartIndicatorEnabled": b.smart_indicator_enabled,
+        "indicatorTopLeft": _point_to_dict(b.indicator_top_left),
+        "indicatorBottomRight": _point_to_dict(b.indicator_bottom_right),
+    }
 
 
 def _click_batch_from_dict(d: dict) -> ClickBatch:
     repeat_min = d.get("repeatMin", d.get("repeatCount", 1))
     repeat_max = d.get("repeatMax", d.get("repeatCount", repeat_min))
-    return ClickBatch(_point_from_dict(d["point"]), repeat_min, repeat_max)
+    indicator_top_left = _point_from_dict(d["indicatorTopLeft"]) if "indicatorTopLeft" in d else (0, 0)
+    indicator_bottom_right = _point_from_dict(d["indicatorBottomRight"]) if "indicatorBottomRight" in d else (0, 0)
+    return ClickBatch(_point_from_dict(d["point"]), repeat_min, repeat_max,
+                       d.get("smartIndicatorEnabled", False), indicator_top_left, indicator_bottom_right)
 
 
 def config_to_dict(cfg: AppConfig) -> dict:
@@ -140,6 +153,51 @@ class MouseController:
             time.sleep(step_delay)
 
         pyautogui.mouseUp()
+
+
+def _smoothed(values, window):
+    if window <= 1:
+        return list(values)
+    half = window // 2
+    n = len(values)
+    return [sum(values[max(0, i - half):min(n, i + half + 1)]) / len(values[max(0, i - half):min(n, i + half + 1)])
+            for i in range(n)]
+
+
+def count_photo_segments(top_left, bottom_right):
+    """Считает число светлых полосок-сегментов (индикатор количества фото) в заданной области экрана."""
+    x1, y1 = top_left
+    x2, y2 = bottom_right
+    left, top = int(min(x1, x2)), int(min(y1, y2))
+    width, height = int(abs(x2 - x1)), int(abs(y2 - y1))
+    if width < 4 or height < 1:
+        return 0
+
+    shot = pyautogui.screenshot(region=(left, top, width, height)).convert("L")
+    pixels = shot.load()
+    col_brightness = [sum(pixels[x, y] for y in range(height)) / height for x in range(width)]
+
+    if max(col_brightness) - min(col_brightness) < 8:
+        return 0  # область почти однотонная — полосок не видно (неверная область или нет разрешения на запись экрана)
+
+    # сглаживаем узким окном — гасит одиночные шумовые пиксели (анти-алиасинг/сжатие видео),
+    # не трогая настоящие разрывы между полосками
+    col_brightness = _smoothed(col_brightness, 3)
+    threshold = (max(col_brightness) + min(col_brightness)) / 2
+    is_bright = [b >= threshold for b in col_brightness]
+
+    min_segment = 2
+    segments = 0
+    run = 0
+    for bright in is_bright:
+        if bright:
+            run += 1
+            if run == min_segment:
+                segments += 1
+        else:
+            run = 0
+
+    return segments
 
 
 def is_accessibility_trusted() -> bool:
@@ -221,11 +279,20 @@ class AutomationEngine:
 
             if self._stop_event.is_set():
                 return
-            for _ in range(max(filler.random_repeat_count(), 0)):
+            for _ in range(max(self._filler_repeat_count(filler), 0)):
                 if self._stop_event.is_set():
                     return
                 MouseController.click(filler.point)
                 self._wait_random_delay(config)
+
+    def _filler_repeat_count(self, filler: ClickBatch) -> int:
+        if filler.smart_indicator_enabled:
+            try:
+                segments = count_photo_segments(filler.indicator_top_left, filler.indicator_bottom_right)
+            except Exception:
+                segments = 0
+            return max(segments - 1, 0)
+        return filler.random_repeat_count()
 
     def _wait_random_delay(self, config: AppConfig):
         lo = min(config.delay_min_seconds, config.delay_max_seconds)
@@ -291,6 +358,8 @@ class ClickerApp:
         style.configure("Card.TFrame", background=CARD_BG)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Card.TLabel", background=CARD_BG, foreground=TEXT)
+        style.configure("Card.TCheckbutton", background=CARD_BG, foreground=TEXT)
+        style.map("Card.TCheckbutton", background=[("active", CARD_BG)])
         style.configure("Muted.TLabel", background=BG, foreground=MUTED)
         style.configure("Muted.Card.TLabel", background=CARD_BG, foreground=MUTED)
         style.configure("Header.TLabel", background=BG, foreground=TEXT, font=(base_font[0], 17, "bold"))
@@ -341,6 +410,11 @@ class ClickerApp:
         self.v3 = dict(
             px=tk.IntVar(value=int(cfg.batch3.point[0])), py=tk.IntVar(value=int(cfg.batch3.point[1])),
             count_min=tk.IntVar(value=cfg.batch3.repeat_min), count_max=tk.IntVar(value=cfg.batch3.repeat_max),
+            smart_enabled=tk.BooleanVar(value=cfg.batch3.smart_indicator_enabled),
+            itlx=tk.IntVar(value=int(cfg.batch3.indicator_top_left[0])),
+            itly=tk.IntVar(value=int(cfg.batch3.indicator_top_left[1])),
+            ibrx=tk.IntVar(value=int(cfg.batch3.indicator_bottom_right[0])),
+            ibry=tk.IntVar(value=int(cfg.batch3.indicator_bottom_right[1])),
         )
         self.delay_min_var = tk.DoubleVar(value=cfg.delay_min_seconds)
         self.delay_max_var = tk.DoubleVar(value=cfg.delay_max_seconds)
@@ -354,7 +428,10 @@ class ClickerApp:
             batch1=drag_batch(self.v1),
             batch2=drag_batch(self.v2),
             batch3=ClickBatch((self.v3["px"].get(), self.v3["py"].get()),
-                               self.v3["count_min"].get(), self.v3["count_max"].get()),
+                               self.v3["count_min"].get(), self.v3["count_max"].get(),
+                               self.v3["smart_enabled"].get(),
+                               (self.v3["itlx"].get(), self.v3["itly"].get()),
+                               (self.v3["ibrx"].get(), self.v3["ibry"].get())),
             delay_min_seconds=self.delay_min_var.get(),
             delay_max_seconds=self.delay_max_var.get(),
         )
@@ -466,6 +543,20 @@ class ClickerApp:
         ttk.Spinbox(row, from_=0, to=999, textvariable=v["count_min"], width=4).pack(side="left", padx=(6, 4))
         ttk.Label(row, text="до", style="Card.TLabel").pack(side="left")
         ttk.Spinbox(row, from_=0, to=999, textvariable=v["count_max"], width=4).pack(side="left", padx=(4, 0))
+
+        ttk.Checkbutton(
+            box, text="Определять число кликов по индикатору фото (вместо диапазона выше)",
+            variable=v["smart_enabled"], style="Card.TCheckbutton",
+        ).pack(anchor="w", pady=(10, 4))
+        self._coord_row(box, "Угол индикатора A", v["itlx"], v["itly"])
+        self._coord_row(box, "Угол индикатора Б", v["ibrx"], v["ibry"])
+        ttk.Label(
+            box,
+            text="Если включено — перед кликами программа сфотографирует эту область (узкая полоска "
+                 "над фото профиля), посчитает светлые сегменты и кликнет на один раз меньше, чем их число. "
+                 "Требует разрешение macOS «Запись экрана» в дополнение к «Универсальному доступу».",
+            style="Muted.Card.TLabel", wraplength=480, justify="left",
+        ).pack(anchor="w", pady=(6, 0))
 
     def _coord_row(self, parent, label, x_var, y_var):
         row = ttk.Frame(parent, style="Card.TFrame")
