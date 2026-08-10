@@ -24,7 +24,8 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 class DragBatch:
     area_top_left: tuple = (500, 500)
     area_bottom_right: tuple = (600, 560)
-    repeat_count: int = 9
+    repeat_min: int = 9
+    repeat_max: int = 9
     drag_distance: int = 76
     direction: str = "right"
 
@@ -35,18 +36,25 @@ class DragBatch:
         y = random.uniform(min(y1, y2), max(y1, y2))
         return (x, y)
 
+    def random_repeat_count(self):
+        return random.randint(min(self.repeat_min, self.repeat_max), max(self.repeat_min, self.repeat_max))
+
 
 @dataclass
 class ClickBatch:
     point: tuple = (750, 800)
-    repeat_count: int = 3
+    repeat_min: int = 3
+    repeat_max: int = 3
+
+    def random_repeat_count(self):
+        return random.randint(min(self.repeat_min, self.repeat_max), max(self.repeat_min, self.repeat_max))
 
 
 @dataclass
 class AppConfig:
-    batch1: DragBatch = field(default_factory=lambda: DragBatch((500, 500), (600, 560), 9, 76, "right"))
-    batch2: DragBatch = field(default_factory=lambda: DragBatch((900, 500), (1000, 560), 2, 76, "left"))
-    batch3: ClickBatch = field(default_factory=lambda: ClickBatch((750, 800), 3))
+    batch1: DragBatch = field(default_factory=lambda: DragBatch((500, 500), (600, 560), 9, 9, 76, "right"))
+    batch2: DragBatch = field(default_factory=lambda: DragBatch((900, 500), (1000, 560), 2, 2, 76, "left"))
+    batch3: ClickBatch = field(default_factory=lambda: ClickBatch((750, 800), 3, 3))
     delay_min_seconds: float = 1.0
     delay_max_seconds: float = 4.0
 
@@ -63,23 +71,28 @@ def _drag_batch_to_dict(b: DragBatch) -> dict:
     return {
         "areaTopLeft": _point_to_dict(b.area_top_left),
         "areaBottomRight": _point_to_dict(b.area_bottom_right),
-        "repeatCount": b.repeat_count,
+        "repeatMin": b.repeat_min,
+        "repeatMax": b.repeat_max,
         "dragDistance": b.drag_distance,
         "direction": b.direction,
     }
 
 
 def _drag_batch_from_dict(d: dict) -> DragBatch:
+    repeat_min = d.get("repeatMin", d.get("repeatCount", 1))
+    repeat_max = d.get("repeatMax", d.get("repeatCount", repeat_min))
     return DragBatch(_point_from_dict(d["areaTopLeft"]), _point_from_dict(d["areaBottomRight"]),
-                      d["repeatCount"], d["dragDistance"], d["direction"])
+                      repeat_min, repeat_max, d["dragDistance"], d["direction"])
 
 
 def _click_batch_to_dict(b: ClickBatch) -> dict:
-    return {"point": _point_to_dict(b.point), "repeatCount": b.repeat_count}
+    return {"point": _point_to_dict(b.point), "repeatMin": b.repeat_min, "repeatMax": b.repeat_max}
 
 
 def _click_batch_from_dict(d: dict) -> ClickBatch:
-    return ClickBatch(_point_from_dict(d["point"]), d["repeatCount"])
+    repeat_min = d.get("repeatMin", d.get("repeatCount", 1))
+    repeat_max = d.get("repeatMax", d.get("repeatCount", repeat_min))
+    return ClickBatch(_point_from_dict(d["point"]), repeat_min, repeat_max)
 
 
 def config_to_dict(cfg: AppConfig) -> dict:
@@ -196,7 +209,7 @@ class AutomationEngine:
             self._on_state_change(False)
 
     def _run_drag_batch(self, batch: DragBatch, filler: ClickBatch, config: AppConfig):
-        for _ in range(max(batch.repeat_count, 0)):
+        for _ in range(max(batch.random_repeat_count(), 0)):
             if self._stop_event.is_set():
                 return
 
@@ -208,7 +221,7 @@ class AutomationEngine:
 
             if self._stop_event.is_set():
                 return
-            for _ in range(max(filler.repeat_count, 0)):
+            for _ in range(max(filler.random_repeat_count(), 0)):
                 if self._stop_event.is_set():
                     return
                 MouseController.click(filler.point)
@@ -318,7 +331,8 @@ class ClickerApp:
             return dict(
                 tlx=tk.IntVar(value=int(b.area_top_left[0])), tly=tk.IntVar(value=int(b.area_top_left[1])),
                 brx=tk.IntVar(value=int(b.area_bottom_right[0])), bry=tk.IntVar(value=int(b.area_bottom_right[1])),
-                count=tk.IntVar(value=b.repeat_count), distance=tk.IntVar(value=b.drag_distance),
+                count_min=tk.IntVar(value=b.repeat_min), count_max=tk.IntVar(value=b.repeat_max),
+                distance=tk.IntVar(value=b.drag_distance),
                 direction=tk.StringVar(value=b.direction),
             )
 
@@ -326,7 +340,7 @@ class ClickerApp:
         self.v2 = drag_vars(cfg.batch2)
         self.v3 = dict(
             px=tk.IntVar(value=int(cfg.batch3.point[0])), py=tk.IntVar(value=int(cfg.batch3.point[1])),
-            count=tk.IntVar(value=cfg.batch3.repeat_count),
+            count_min=tk.IntVar(value=cfg.batch3.repeat_min), count_max=tk.IntVar(value=cfg.batch3.repeat_max),
         )
         self.delay_min_var = tk.DoubleVar(value=cfg.delay_min_seconds)
         self.delay_max_var = tk.DoubleVar(value=cfg.delay_max_seconds)
@@ -334,12 +348,13 @@ class ClickerApp:
     def _gui_to_config(self) -> AppConfig:
         def drag_batch(v):
             return DragBatch((v["tlx"].get(), v["tly"].get()), (v["brx"].get(), v["bry"].get()),
-                              v["count"].get(), v["distance"].get(), v["direction"].get())
+                              v["count_min"].get(), v["count_max"].get(), v["distance"].get(), v["direction"].get())
 
         return AppConfig(
             batch1=drag_batch(self.v1),
             batch2=drag_batch(self.v2),
-            batch3=ClickBatch((self.v3["px"].get(), self.v3["py"].get()), self.v3["count"].get()),
+            batch3=ClickBatch((self.v3["px"].get(), self.v3["py"].get()),
+                               self.v3["count_min"].get(), self.v3["count_max"].get()),
             delay_min_seconds=self.delay_min_var.get(),
             delay_max_seconds=self.delay_max_var.get(),
         )
@@ -420,10 +435,15 @@ class ClickerApp:
         self._coord_row(box, "Угол области A", v["tlx"], v["tly"])
         self._coord_row(box, "Угол области Б", v["brx"], v["bry"])
 
+        row0 = ttk.Frame(box, style="Card.TFrame")
+        row0.pack(fill="x", pady=(10, 0))
+        ttk.Label(row0, text="Повторов: от", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(row0, from_=0, to=999, textvariable=v["count_min"], width=4).pack(side="left", padx=(6, 4))
+        ttk.Label(row0, text="до", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(row0, from_=0, to=999, textvariable=v["count_max"], width=4).pack(side="left", padx=(4, 0))
+
         row = ttk.Frame(box, style="Card.TFrame")
-        row.pack(fill="x", pady=(10, 0))
-        ttk.Label(row, text="Повторов:", style="Card.TLabel").pack(side="left")
-        ttk.Spinbox(row, from_=0, to=999, textvariable=v["count"], width=5).pack(side="left", padx=(6, 18))
+        row.pack(fill="x", pady=(8, 0))
         ttk.Label(row, text="Дистанция перетягивания, px:", style="Card.TLabel").pack(side="left")
         ttk.Entry(row, textvariable=v["distance"], width=6, style="Mono.TEntry").pack(side="left", padx=(6, 18))
         ttk.Label(row, text="Направление:", style="Card.TLabel").pack(side="left")
@@ -442,8 +462,10 @@ class ClickerApp:
         self._coord_row(box, "Точка клика", v["px"], v["py"])
         row = ttk.Frame(box, style="Card.TFrame")
         row.pack(fill="x", pady=(10, 0))
-        ttk.Label(row, text="Кликов между перетягиваниями:", style="Card.TLabel").pack(side="left")
-        ttk.Spinbox(row, from_=0, to=999, textvariable=v["count"], width=5).pack(side="left", padx=6)
+        ttk.Label(row, text="Кликов между перетягиваниями: от", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=999, textvariable=v["count_min"], width=4).pack(side="left", padx=(6, 4))
+        ttk.Label(row, text="до", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=999, textvariable=v["count_max"], width=4).pack(side="left", padx=(4, 0))
 
     def _coord_row(self, parent, label, x_var, y_var):
         row = ttk.Frame(parent, style="Card.TFrame")
