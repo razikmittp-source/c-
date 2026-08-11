@@ -8,7 +8,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import pyautogui
 from pynput import keyboard, mouse
@@ -165,25 +165,39 @@ def _smoothed(values, window):
 
 
 def count_photo_segments(top_left, bottom_right):
-    """Считает число светлых полосок-сегментов (индикатор количества фото) в заданной области экрана."""
+    """Считает число светлых полосок-сегментов (индикатор количества фото) в заданной области экрана.
+
+    Активная полоска обычно яркая, остальные — тусклые серые на тёмном фоне карточки, поэтому берём
+    МАКСИМУМ яркости по каждому столбцу (а не среднее) — так область можно выделять с запасом по высоте,
+    не попадая пиксель-в-пиксель в саму полоску. Уровень фона берём как минимум по области, а не середину
+    диапазона — иначе при малом числе широких полосок сам тусклый сегмент ошибочно принимается за фон.
+    """
     x1, y1 = top_left
     x2, y2 = bottom_right
     left, top = int(min(x1, x2)), int(min(y1, y2))
     width, height = int(abs(x2 - x1)), int(abs(y2 - y1))
-    if width < 4 or height < 1:
+    if width < 20 or height < 1:
         return 0
 
     shot = pyautogui.screenshot(region=(left, top, width, height)).convert("L")
     pixels = shot.load()
-    col_brightness = [sum(pixels[x, y] for y in range(height)) / height for x in range(width)]
+    col_brightness = [max(pixels[x, y] for y in range(height)) for x in range(width)]
 
-    if max(col_brightness) - min(col_brightness) < 8:
+    # обрезаем края области — там часто попадает скругление/тень карточки, а не сами полоски
+    margin = max(2, int(width * 0.05))
+    if width - 2 * margin > 10:
+        col_brightness = col_brightness[margin: width - margin]
+
+    # сглаживаем узким окном — гасит одиночные шумовые пиксели (анти-алиасинг/сжатие видео)
+    col_brightness = _smoothed(col_brightness, 3)
+    width = len(col_brightness)
+
+    baseline = min(col_brightness)
+    spread = max(col_brightness) - baseline
+    if spread < 15:
         return 0  # область почти однотонная — полосок не видно (неверная область или нет разрешения на запись экрана)
 
-    # сглаживаем узким окном — гасит одиночные шумовые пиксели (анти-алиасинг/сжатие видео),
-    # не трогая настоящие разрывы между полосками
-    col_brightness = _smoothed(col_brightness, 3)
-    threshold = (max(col_brightness) + min(col_brightness)) / 2
+    threshold = baseline + max(15, spread * 0.3)
     is_bright = [b >= threshold for b in col_brightness]
 
     min_segment = max(3, int(width * 0.01))
@@ -559,13 +573,27 @@ class ClickerApp:
         ).pack(anchor="w", pady=(10, 4))
         self._coord_row(box, "Угол индикатора A", v["itlx"], v["itly"])
         self._coord_row(box, "Угол индикатора Б", v["ibrx"], v["ibry"])
+        ttk.Button(box, text="Проверить сейчас", command=lambda: self._test_indicator(v)).pack(anchor="w", pady=(6, 0))
         ttk.Label(
             box,
             text="Если включено — перед кликами программа сфотографирует эту область (узкая полоска "
-                 "над фото профиля), посчитает светлые сегменты и кликнет на один раз меньше, чем их число. "
+                 "над фото профиля) и посчитает светлые сегменты: 0 полосок = 0 кликов, 2 полоски = 1 клик, "
+                 "3 и больше = 3 клика. Кнопка «Проверить сейчас» покажет, что видит программа прямо сейчас — "
+                 "наведите область на реальный экран с индикатором и нажмите её для проверки координат. "
                  "Требует разрешение macOS «Запись экрана» в дополнение к «Универсальному доступу».",
             style="Muted.Card.TLabel", wraplength=480, justify="left",
         ).pack(anchor="w", pady=(6, 0))
+
+    def _test_indicator(self, v):
+        top_left = (v["itlx"].get(), v["itly"].get())
+        bottom_right = (v["ibrx"].get(), v["ibry"].get())
+        try:
+            segments = count_photo_segments(top_left, bottom_right)
+        except Exception as e:
+            messagebox.showerror("Проверка индикатора", f"Не удалось сделать скриншот: {e}")
+            return
+        clicks = clicks_for_segment_count(segments)
+        messagebox.showinfo("Проверка индикатора", f"Обнаружено полосок: {segments}\nБудет сделано кликов: {clicks}")
 
     def _coord_row(self, parent, label, x_var, y_var):
         row = ttk.Frame(parent, style="Card.TFrame")
