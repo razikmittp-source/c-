@@ -156,61 +156,120 @@ class MouseController:
 
 
 def _smoothed(values, window):
-    if window <= 1:
+    """Сглаживает массив значений скользящим средним."""
+    if window <= 1 or len(values) == 0:
         return list(values)
     half = window // 2
     n = len(values)
-    return [sum(values[max(0, i - half):min(n, i + half + 1)]) / len(values[max(0, i - half):min(n, i + half + 1)])
-            for i in range(n)]
+    result = []
+    for i in range(n):
+        start = max(0, i - half)
+        end = min(n, i + half + 1)
+        chunk = values[start:end]
+        if chunk:
+            result.append(sum(chunk) / len(chunk))
+        else:
+            result.append(values[i])
+    return result
 
 
 def count_photo_segments(top_left, bottom_right):
     """Считает число светлых полосок-сегментов (индикатор количества фото) в заданной области экрана.
-
-    Активная полоска обычно яркая, остальные — тусклые серые на тёмном фоне карточки, поэтому берём
-    МАКСИМУМ яркости по каждому столбцу (а не среднее) — так область можно выделять с запасом по высоте,
-    не попадая пиксель-в-пиксель в саму полоску. Уровень фона берём как минимум по области, а не середину
-    диапазона — иначе при малом числе широких полосок сам тусклый сегмент ошибочно принимается за фон.
+    
+    Улучшенная версия с более надежным обнаружением полосок.
     """
     x1, y1 = top_left
     x2, y2 = bottom_right
-    left, top = int(min(x1, x2)), int(min(y1, y2))
-    width, height = int(abs(x2 - x1)), int(abs(y2 - y1))
-    if width < 20 or height < 1:
+    
+    # Нормализация координат
+    left = int(min(x1, x2))
+    top = int(min(y1, y2))
+    right = int(max(x1, x2))
+    bottom = int(max(y1, y2))
+    
+    width = right - left
+    height = bottom - top
+
+    # Минимальный размер области для анализа
+    if width < 10 or height < 5:
+        print(f"[DEBUG] Область слишком мала: {width}x{height}")
         return 0
 
-    shot = pyautogui.screenshot(region=(left, top, width, height)).convert("L")
+    try:
+        shot = pyautogui.screenshot(region=(left, top, width, height)).convert("L")
+    except Exception as e:
+        print(f"[DEBUG] Ошибка скриншота: {e}")
+        return 0
+        
     pixels = shot.load()
-    col_brightness = [max(pixels[x, y] for y in range(height)) for x in range(width)]
+    
+    # Вычисляем яркость каждого столбца (максимум по высоте, чтобы поймать полоску даже если область выше)
+    col_brightness = []
+    for x in range(width):
+        max_bright = 0
+        for y in range(height):
+            b = pixels[x, y]
+            if b > max_bright:
+                max_bright = b
+        col_brightness.append(max_bright)
 
-    # обрезаем края области — там часто попадает скругление/тень карточки, а не сами полоски
-    margin = max(2, int(width * 0.05))
-    if width - 2 * margin > 10:
-        col_brightness = col_brightness[margin: width - margin]
+    # Обрезаем края (5% с каждой стороны), чтобы убрать тени и скругления интерфейса
+    margin = max(1, int(width * 0.05))
+    if width > margin * 2:
+        col_brightness = col_brightness[margin : width - margin]
+    
+    if len(col_brightness) < 5:
+        print(f"[DEBUG] После обрезки краев мало данных: {len(col_brightness)}")
+        return 0
 
-    # сглаживаем узким окном — гасит одиночные шумовые пиксели (анти-алиасинг/сжатие видео)
+    # Сглаживаем данные (окно 3 пикселя)
     col_brightness = _smoothed(col_brightness, 3)
     width = len(col_brightness)
 
-    baseline = min(col_brightness)
-    spread = max(col_brightness) - baseline
-    if spread < 15:
-        return 0  # область почти однотонная — полосок не видно (неверная область или нет разрешения на запись экрана)
+    # Определяем базовый уровень (фон) и пиковую яркость
+    # Используем перцентили вместо мин/макс, чтобы выбросы не ломали логику
+    sorted_bright = sorted(col_brightness)
+    # Фон - это нижние 20% яркости
+    baseline_idx = max(0, int(len(sorted_bright) * 0.2))
+    baseline = sorted_bright[baseline_idx] if baseline_idx < len(sorted_bright) else sorted_bright[0]
+    
+    # Максимальная яркость в области
+    peak = max(col_brightness)
+    
+    spread = peak - baseline
+    
+    # Если контраст слишком мал, считаем что полосок нет (или область выбрана неверно)
+    if spread < 20: 
+        print(f"[DEBUG] Малый контраст: spread={spread}, baseline={baseline}, peak={peak}")
+        return 0
 
-    threshold = baseline + max(15, spread * 0.3)
-    is_bright = [b >= threshold for b in col_brightness]
+    # Порог отсечки: фон + 30% от разброса, но не менее 20 единиц от фона
+    threshold = baseline + max(20, int(spread * 0.3))
+    
+    print(f"[DEBUG] Анализ: baseline={baseline}, peak={peak}, spread={spread}, threshold={threshold}")
+    
+    # Бинаризация: 1 если ярко, 0 если темно
+    is_bright = [1 if b >= threshold else 0 for b in col_brightness]
 
-    min_segment = max(3, int(width * 0.01))
+    # Подсчет непрерывных сегментов (полосок)
+    # Минимальная ширина полоски: 3 пикселя или 1% от ширины области
+    min_segment_width = max(3, int(width * 0.01))
+    
     segments = 0
     run = 0
-    for bright in is_bright:
-        if bright:
+    for val in is_bright:
+        if val == 1:
             run += 1
-            if run == min_segment:
-                segments += 1
         else:
+            if run >= min_segment_width:
+                segments += 1
             run = 0
+    
+    # Проверка последнего сегмента, если он дошел до конца строки
+    if run >= min_segment_width:
+        segments += 1
 
+    print(f"[DEBUG] Найдено полосок: {segments}")
     return segments
 
 
@@ -312,9 +371,13 @@ class AutomationEngine:
         if filler.smart_indicator_enabled:
             try:
                 segments = count_photo_segments(filler.indicator_top_left, filler.indicator_bottom_right)
-            except Exception:
+                print(f"[DEBUG] Индикатор: найдено {segments} полосок")
+            except Exception as e:
+                print(f"[DEBUG] Ошибка при подсчете полосок: {e}")
                 segments = 0
-            return clicks_for_segment_count(segments)
+            clicks = clicks_for_segment_count(segments)
+            print(f"[DEBUG] Будет сделано кликов: {clicks}")
+            return clicks
         return filler.random_repeat_count()
 
     def _wait_random_delay(self, config: AppConfig):
@@ -587,13 +650,37 @@ class ClickerApp:
     def _test_indicator(self, v):
         top_left = (v["itlx"].get(), v["itly"].get())
         bottom_right = (v["ibrx"].get(), v["ibry"].get())
+        
+        # Проверка координат
+        if top_left == bottom_right or top_left == (0, 0) and bottom_right == (0, 0):
+            messagebox.showwarning(
+                "Проверка индикатора", 
+                "Координаты индикатора не настроены!\n\n"
+                "1. Нажмите кнопку «Пипетка» рядом с «Угол индикатора А»\n"
+                "2. Кликните в левый верхний угол области с полосками на экране\n"
+                "3. Нажмите «Пипетка» рядом с «Угол индикатора Б»\n"
+                "4. Кликните в правый нижний угол области с полосками\n"
+                "5. Нажмите «Проверить сейчас» ещё раз"
+            )
+            return
+        
         try:
             segments = count_photo_segments(top_left, bottom_right)
         except Exception as e:
             messagebox.showerror("Проверка индикатора", f"Не удалось сделать скриншот: {e}")
             return
+        
         clicks = clicks_for_segment_count(segments)
-        messagebox.showinfo("Проверка индикатора", f"Обнаружено полосок: {segments}\nБудет сделано кликов: {clicks}")
+        
+        msg = (
+            f"Обнаружено полосок: {segments}\n"
+            f"Будет сделано кликов: {clicks}\n\n"
+            f"Правило:\n"
+            f"• 0-1 полоска = 0 кликов\n"
+            f"• 2 полоски = 1 клик\n"
+            f"• 3+ полоски = 3 клика"
+        )
+        messagebox.showinfo("Проверка индикатора", msg)
 
     def _coord_row(self, parent, label, x_var, y_var):
         row = ttk.Frame(parent, style="Card.TFrame")
