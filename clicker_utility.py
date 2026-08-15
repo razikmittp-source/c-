@@ -164,14 +164,73 @@ def _smoothed(values, window):
             for i in range(n)]
 
 
-def count_photo_segments(top_left, bottom_right):
-    """Считает число светлых полосок-сегментов (индикатор количества фото) в заданной области экрана.
+def _count_photo_segments_in_image(shot):
+    """Ищет ряд из одинаковых светлых горизонтальных сегментов.
 
-    Активная полоска обычно яркая, остальные — тусклые серые на тёмном фоне карточки, поэтому берём
-    МАКСИМУМ яркости по каждому столбцу (а не среднее) — так область можно выделять с запасом по высоте,
-    не попадая пиксель-в-пиксель в саму полоску. Уровень фона берём как минимум по области, а не середину
-    диапазона — иначе при малом числе широких полосок сам тусклый сегмент ошибочно принимается за фон.
+    Ищем весь ровный ряд, а не отдельные яркие детали: иначе блики, текст и
+    границы на фото дают ложные клики. При сомнении возвращаем 0.
     """
+    shot = shot.convert("RGB")
+    width, height = shot.size
+    if width < 20 or height < 2:
+        return 0
+
+    pixels = shot.load()
+    min_run = max(6, int(width * 0.055))
+    max_run = int(width * 0.48)
+    min_gap = max(2, int(width * 0.008))
+    row_candidates = []
+
+    for y in range(height):
+        brightness = [(max(pixels[x, y]) + min(pixels[x, y])) / 2 for x in range(width)]
+        ordered = sorted(brightness)
+        # При 2–3 сегментах полоски занимают почти всю ширину, поэтому
+        # оцениваем фон по самым тёмным 5%, а не по среднему цвету ряда.
+        background = ordered[max(0, int(width * 0.05) - 1)]
+        threshold = max(105, background + 18)
+        mask = []
+        for x in range(width):
+            r, g, b = pixels[x, y]
+            # Индикатор белый/серый: цветные детали фото отбрасываем.
+            mask.append(max(r, g, b) - min(r, g, b) <= 48 and brightness[x] >= threshold)
+
+        runs = []
+        start = None
+        for x, bright in enumerate(mask + [False]):
+            if bright and start is None:
+                start = x
+            elif not bright and start is not None:
+                if min_run <= x - start <= max_run:
+                    runs.append((start, x))
+                start = None
+
+        if 2 <= len(runs) <= 10:
+            widths = [end - start for start, end in runs]
+            gaps = [runs[i + 1][0] - runs[i][1] for i in range(len(runs) - 1)]
+            mean_width = sum(widths) / len(widths)
+            covered = runs[-1][1] - runs[0][0]
+            if (min(gaps, default=min_gap) >= min_gap
+                    and max(widths) <= mean_width * 1.65
+                    and min(widths) >= mean_width * 0.55
+                    and covered >= width * 0.45):
+                row_candidates.append((y, len(runs), runs))
+
+    # Одиночную шумовую строку не считаем полоской.
+    for i, (y, count, runs) in enumerate(row_candidates):
+        matching_rows = 1
+        for next_y, next_count, next_runs in row_candidates[i + 1:]:
+            if next_y > y + 4:
+                break
+            if next_count == count and all(abs(a[0] - b[0]) <= 4 and abs(a[1] - b[1]) <= 4
+                                           for a, b in zip(runs, next_runs)):
+                matching_rows += 1
+        if matching_rows >= 2:
+            return count
+    return 0
+
+
+def _capture_photo_segments(top_left, bottom_right):
+    """Снимает заданную область экрана и передаёт её детектору индиктора."""
     x1, y1 = top_left
     x2, y2 = bottom_right
     left, top = int(min(x1, x2)), int(min(y1, y2))
@@ -179,39 +238,20 @@ def count_photo_segments(top_left, bottom_right):
     if width < 20 or height < 1:
         return 0
 
-    shot = pyautogui.screenshot(region=(left, top, width, height)).convert("L")
-    pixels = shot.load()
-    col_brightness = [max(pixels[x, y] for y in range(height)) for x in range(width)]
+    shot = pyautogui.screenshot(region=(left, top, width, height))
+    return _count_photo_segments_in_image(shot)
 
-    # обрезаем края области — там часто попадает скругление/тень карточки, а не сами полоски
-    margin = max(2, int(width * 0.05))
-    if width - 2 * margin > 10:
-        col_brightness = col_brightness[margin: width - margin]
 
-    # сглаживаем узким окном — гасит одиночные шумовые пиксели (анти-алиасинг/сжатие видео)
-    col_brightness = _smoothed(col_brightness, 3)
-    width = len(col_brightness)
-
-    baseline = min(col_brightness)
-    spread = max(col_brightness) - baseline
-    if spread < 15:
-        return 0  # область почти однотонная — полосок не видно (неверная область или нет разрешения на запись экрана)
-
-    threshold = baseline + max(15, spread * 0.3)
-    is_bright = [b >= threshold for b in col_brightness]
-
-    min_segment = max(3, int(width * 0.01))
-    segments = 0
-    run = 0
-    for bright in is_bright:
-        if bright:
-            run += 1
-            if run == min_segment:
-                segments += 1
-        else:
-            run = 0
-
-    return segments
+def count_photo_segments(top_left, bottom_right, confirmations=2):
+    """Подтверждает результат на двух кадрах; любое расхождение отменяет клики."""
+    results = []
+    for attempt in range(max(1, confirmations)):
+        results.append(_capture_photo_segments(top_left, bottom_right))
+        if results[-1] == 0:
+            return 0
+        if attempt + 1 < confirmations:
+            time.sleep(0.06)
+    return results[0] if len(set(results)) == 1 else 0
 
 
 def clicks_for_segment_count(segments: int) -> int:
@@ -302,9 +342,20 @@ class AutomationEngine:
 
             if self._stop_event.is_set():
                 return
-            for _ in range(max(self._filler_repeat_count(filler), 0)):
+            planned_clicks = max(self._filler_repeat_count(filler), 0)
+            for _ in range(planned_clicks):
                 if self._stop_event.is_set():
                     return
+                # После предыдущего клика индикатор мог исчезнуть — серию вслепую не продолжаем.
+                if filler.smart_indicator_enabled:
+                    try:
+                        current_segments = count_photo_segments(
+                            filler.indicator_top_left, filler.indicator_bottom_right
+                        )
+                    except Exception:
+                        current_segments = 0
+                    if clicks_for_segment_count(current_segments) <= 0:
+                        break
                 MouseController.click(filler.point)
                 self._wait_random_delay(config)
 
